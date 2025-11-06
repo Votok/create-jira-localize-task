@@ -1,0 +1,26 @@
+{
+  "name": "create-localize-jira-task",
+  "version": "1.0.0",
+  "description": "CLI tool to automate creation of Jira localization tasks from key:value pairs",
+  "type": "module",
+  "main": "create-loc-task.mjs",
+  "scripts": {
+    "start": "node create-loc-task.mjs"
+  },
+  "keywords": [
+    "jira",
+    "localization",
+    "automation",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.5",
+    "deep-diff": "^1.0.2",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
