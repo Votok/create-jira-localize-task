@@ -116,6 +116,28 @@ function flattenPath(pathArray) {
 }
 
 /**
+ * Recursively flatten a nested object to leaf key-value pairs
+ * Example: { a: { b: "value1", c: "value2" } } => [{ key: "a.b", value: "value1" }, { key: "a.c", value: "value2" }]
+ */
+function flattenObject(obj, prefix = "") {
+  const result = [];
+
+  for (const [key, value] of Object.entries(obj)) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      // Recursively flatten nested objects
+      result.push(...flattenObject(value, fullKey));
+    } else {
+      // Leaf node - add to results
+      result.push({ key: fullKey, value: String(value) });
+    }
+  }
+
+  return result;
+}
+
+/**
  * Detect newly added translation keys using deep-diff
  * Returns array of { key, value } objects for new keys only
  */
@@ -123,12 +145,23 @@ function detectNewKeys(baseContent, currentContent) {
   const differences = diff(baseContent, currentContent) || [];
 
   // Filter only "new" items (kind === 'N')
-  const newKeys = differences
-    .filter((d) => d.kind === "N")
-    .map((d) => ({
-      key: flattenPath(d.path),
-      value: d.rhs, // right-hand side = new value
-    }));
+  const newItems = differences.filter((d) => d.kind === "N");
+
+  const newKeys = [];
+
+  for (const item of newItems) {
+    const basePath = flattenPath(item.path);
+    const value = item.rhs; // right-hand side = new value
+
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      // If the new value is an object, recursively flatten it
+      const flattened = flattenObject(value, basePath);
+      newKeys.push(...flattened);
+    } else {
+      // Leaf node - add directly
+      newKeys.push({ key: basePath, value: String(value) });
+    }
+  }
 
   return newKeys;
 }
