@@ -1,0 +1,12 @@
+{
+  "jira": {
+    "baseURL": "https://your-company.atlassian.net",
+    "email": "your.email@example.com",
+    "apiToken": "your_api_token_here",
+    "projectId": "10000",
+    "issueTypeId": "10001",
+    "assigneeEmail": "assignee@example.com",
+    "reporterEmail": "reporter@example.com"
+  },
+  "baseBranch": "origin/master"
+}

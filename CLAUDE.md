@@ -4,41 +4,55 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Node.js CLI tool that automates Jira localization task creation by detecting newly added translation keys. The tool compares a local translation file against its base branch version, identifies new keys using deep-diff analysis, and creates a formatted Jira issue with all detected changes.
+A Node.js CLI tool that automates Jira localization task creation by detecting newly added translation keys. The tool compares translation files using git, identifies new keys using deep-diff analysis, and creates a formatted Jira issue with all detected changes.
 
-## Commands
+## Installation
 
-### Running the Tool
-```bash
-npm run start
-# or
-node create-loc-task.mjs
-```
-
-### Installation
+### Local Development
 ```bash
 npm install
+npm link
+```
+
+After linking, you can use the `create-loc-task` or `clt` command from anywhere.
+
+### Running Locally (without linking)
+```bash
+npm run start
 ```
 
 ## Configuration
 
-The tool requires a `.env` file (use `.env.example` as template):
+The tool uses a JSON configuration file at `~/.create-jira-localize-task` (use `config.example.json` as template):
 
-**Required Translation Variables:**
-- `TRANSLATION_REPO_PATH`: Absolute path to the translation repository
-- `TRANSLATION_FILE`: Relative path to translation JSON file (e.g., `i18n/en/ims-ui.json`)
-- `BASE_BRANCH`: Base branch for comparison (default: `origin/master`)
+```json
+{
+  "jira": {
+    "baseURL": "https://your-company.atlassian.net",
+    "email": "your.email@example.com",
+    "apiToken": "your_api_token_here",
+    "projectId": "10000",
+    "issueTypeId": "10001",
+    "assigneeEmail": "assignee@example.com",
+    "reporterEmail": "reporter@example.com"
+  },
+  "baseBranch": "origin/master"
+}
+```
 
-**Required Jira Variables:**
-- `JIRA_BASE_URL`: Jira Cloud URL without trailing slash
-- `JIRA_EMAIL`: Jira account email
-- `JIRA_API_TOKEN`: API token from Atlassian Account Security
-- `JIRA_PROJECT_ID`: Numeric project ID
-- `JIRA_ISSUE_TYPE_ID`: Numeric issue type ID
+**Required Jira Fields:**
+- `jira.baseURL`: Jira Cloud URL without trailing slash
+- `jira.email`: Jira account email
+- `jira.apiToken`: API token from Atlassian Account Security
+- `jira.projectId`: Numeric project ID
+- `jira.issueTypeId`: Numeric issue type ID
 
-**Optional Jira Variables:**
-- `JIRA_ASSIGNEE_EMAIL`: Email for automatic assignment
-- `JIRA_REPORTER_EMAIL`: Email for reporter field
+**Optional Jira Fields:**
+- `jira.assigneeEmail`: Email for automatic assignment
+- `jira.reporterEmail`: Email for reporter field
+
+**Optional Fields:**
+- `baseBranch`: Base branch name (default: `origin/master`)
 
 ## Architecture
 
@@ -46,27 +60,36 @@ The tool requires a `.env` file (use `.env.example` as template):
 
 The entire application logic is contained in `create-loc-task.mjs`, which follows this flow:
 
-1. **Configuration & Validation** (lines 12-74)
-   - Loads `.env` variables using dotenv
-   - Validates required environment variables
-   - Checks translation repository and file paths exist
+1. **Configuration & Validation**
+   - `loadConfig()`: Loads JSON config from `~/.create-jira-localize-task`
+   - Validates required Jira fields
+   - `getGitRoot()`: Auto-detects current git repository using `git rev-parse --show-toplevel`
 
-2. **Git-Based Comparison** (lines 76-108)
-   - `getBaseFileContent()`: Fetches base version from git using `git show origin/master:path`
+2. **Interactive File Selection**
+   - `findTranslationFiles()`: Scans `i18n/en/` directory for JSON files
+   - `selectTranslationFile()`: Prompts user to select file (default: ims-ui.json)
+   - `selectMode()`: Prompts for comparison mode (uncommitted vs last commit)
+
+3. **Git-Based Comparison**
+   - `getFileFromGit()`: Fetches file content from git at specific revision using `git show`
    - `getCurrentFileContent()`: Reads current filesystem version
-   - Uses git commands with `-C` flag to operate from any directory
+   - `getFileContents()`: Orchestrates comparison based on selected mode:
+     - **Uncommitted**: HEAD vs working directory
+     - **Last commit**: HEAD~1 vs HEAD
+   - Uses git commands with `-C` flag for cross-platform compatibility
 
-3. **Deep-Diff Analysis** (lines 110-134)
+4. **Deep-Diff Analysis**
    - `detectNewKeys()`: Uses `deep-diff` library to compare JSON structures
    - Filters for kind === 'N' (new additions only)
-   - `flattenPath()`: Converts nested arrays to dot notation (e.g., `['general', 'validation-errors', 'emptyString']` → `'general.validation-errors.emptyString'`)
+   - `flattenPath()`: Converts nested arrays to dot notation
+   - `flattenObject()`: Recursively flattens nested objects to leaf key-value pairs
 
-4. **Format Generation** (lines 136-222)
+5. **Format Generation**
    - `generateMarkdownTable()`: Creates console output table
    - `createADFTable()`: Generates Atlassian Document Format table for Jira API
    - ADF structure: doc → table → tableRow → tableHeader/tableCell → paragraph → text
 
-5. **Jira Integration** (lines 224-362)
+6. **Jira Integration**
    - `getAccountId()`: Resolves email addresses to Jira account IDs
    - Uses multiple search endpoints (assignable/search and user/search)
    - `createJiraIssue()`: Creates issue via REST API v3
@@ -95,20 +118,40 @@ The tool only detects NEW keys (additions), not modifications or deletions. This
 - User lookup failures are non-fatal (issues created without assignee/reporter)
 - Git errors include contextual hints (e.g., "Did you forget to fetch?")
 
+## Usage
+
+Navigate to your translation repository and run:
+
+```bash
+create-loc-task
+# or using the alias
+clt
+```
+
+The CLI will interactively prompt you for:
+
+1. **Translation file selection**: Choose from available JSON files in `i18n/en/` directory (default: `ims-ui.json`)
+2. **Comparison mode**:
+   - **Uncommitted changes**: Compare working directory vs HEAD (detects changes not yet committed)
+   - **Last commit changes**: Compare HEAD vs HEAD~1 (detects what was changed in the last commit)
+
 ## Workflow Context
 
-This tool is designed to run AFTER local commits but BEFORE pushing to remote:
-
+**For Uncommitted Changes:**
 1. Make translation changes in translation repository
-2. Commit changes locally
-3. Run this tool (detects differences vs. origin/master)
-4. Push to remote
+2. Run `create-loc-task` and select "Work with uncommitted changes"
+3. Review and create Jira task
+4. Commit and push changes
 
-The comparison is local working directory vs. remote base branch, so uncommitted changes are also detected.
+**For Last Commit:**
+1. Make and commit translation changes
+2. Run `create-loc-task` and select "Work with last commit changes"
+3. Review and create Jira task based on what was just committed
+4. Push to remote
 
 ## Dependencies
 
 - `axios`: Jira REST API communication
 - `deep-diff`: JSON structure comparison
-- `dotenv`: Environment variable loading
-- Node.js built-ins: `child_process` (execSync), `fs`, `path`
+- `prompts`: Interactive CLI prompts
+- Node.js built-ins: `child_process` (execSync), `fs`, `path`, `os`

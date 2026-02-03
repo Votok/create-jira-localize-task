@@ -1,104 +1,171 @@
 #!/usr/bin/env node
 
 import { execSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { readFileSync, existsSync, readdirSync } from "fs";
+import { join, resolve } from "path";
+import { homedir } from "os";
 import deepDiff from "deep-diff";
 import axios from "axios";
-import dotenv from "dotenv";
+import prompts from "prompts";
 
 const { diff } = deepDiff;
 
-// Load environment variables
-dotenv.config();
-
-// Get configuration from environment
-const translationConfig = {
-  repoPath: process.env.TRANSLATION_REPO_PATH,
-  filePath: process.env.TRANSLATION_FILE,
-  baseBranch: process.env.BASE_BRANCH || "origin/master",
-};
-
-// Validate environment variables
-const requiredEnvVars = [
-  "JIRA_BASE_URL",
-  "JIRA_EMAIL",
-  "JIRA_API_TOKEN",
-  "JIRA_PROJECT_ID",
-  "JIRA_ISSUE_TYPE_ID",
-];
-
-const missingVars = requiredEnvVars.filter((varName) => !process.env[varName]);
-if (missingVars.length > 0) {
-  console.error("Error: Missing required environment variables:");
-  missingVars.forEach((varName) => console.error(`  - ${varName}`));
-  console.error("\nPlease create a .env file based on .env.example");
-  process.exit(1);
-}
-
-// Get Jira configuration from environment
-const config = {
-  baseURL: process.env.JIRA_BASE_URL,
-  email: process.env.JIRA_EMAIL,
-  apiToken: process.env.JIRA_API_TOKEN,
-  projectId: process.env.JIRA_PROJECT_ID,
-  issueTypeId: process.env.JIRA_ISSUE_TYPE_ID,
-  assigneeEmail: process.env.JIRA_ASSIGNEE_EMAIL || "",
-  reporterEmail: process.env.JIRA_REPORTER_EMAIL || "",
-};
+// Configuration
+const CONFIG_PATH = join(homedir(), ".create-jira-localize-task");
+const TRANSLATION_DIR = "i18n/en";
+const DEFAULT_FILE = "ims-ui.json";
 
 /**
- * Validate translation repository configuration
+ * Load configuration from ~/.create-jira-localize-task
  */
-function validateConfig() {
-  if (!translationConfig.repoPath) {
-    console.error("Error: TRANSLATION_REPO_PATH is required in .env");
+function loadConfig() {
+  if (!existsSync(CONFIG_PATH)) {
+    console.error(`Error: Configuration file not found at: ${CONFIG_PATH}`);
+    console.error(`\nPlease create it based on config.example.json`);
+    console.error(`Example: cp config.example.json ~/.create-jira-localize-task`);
     process.exit(1);
   }
 
-  if (!translationConfig.filePath) {
-    console.error("Error: TRANSLATION_FILE is required in .env");
-    process.exit(1);
-  }
-
-  if (!existsSync(translationConfig.repoPath)) {
-    console.error(`Error: Translation repository not found at: ${translationConfig.repoPath}`);
-    process.exit(1);
-  }
-
-  const fullPath = join(translationConfig.repoPath, translationConfig.filePath);
-  if (!existsSync(fullPath)) {
-    console.error(`Error: Translation file not found at: ${fullPath}`);
-    process.exit(1);
-  }
-}
-
-/**
- * Get the base version of the translation file from git
- */
-function getBaseFileContent() {
   try {
-    const gitCommand = `git -C "${translationConfig.repoPath}" show ${translationConfig.baseBranch}:${translationConfig.filePath}`;
+    const configContent = readFileSync(CONFIG_PATH, "utf-8");
+    const config = JSON.parse(configContent);
+
+    // Validate required Jira fields
+    const requiredFields = ["baseURL", "email", "apiToken", "projectId", "issueTypeId"];
+    const missingFields = requiredFields.filter(field => !config.jira?.[field]);
+
+    if (missingFields.length > 0) {
+      console.error("Error: Missing required fields in config:");
+      missingFields.forEach(field => console.error(`  - jira.${field}`));
+      process.exit(1);
+    }
+
+    return config;
+  } catch (error) {
+    console.error(`Error reading config file: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Get the root directory of the current git repository
+ */
+function getGitRoot() {
+  try {
+    const gitRoot = execSync("git rev-parse --show-toplevel", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    }).trim();
+    return gitRoot;
+  } catch (error) {
+    console.error("Error: Not in a git repository");
+    console.error("Please run this command from within your translation repository");
+    process.exit(1);
+  }
+}
+
+/**
+ * Find all JSON files in the i18n/en directory
+ */
+function findTranslationFiles(repoPath) {
+  const translationDir = join(repoPath, TRANSLATION_DIR);
+
+  if (!existsSync(translationDir)) {
+    console.error(`Error: Translation directory not found: ${translationDir}`);
+    console.error(`Expected to find: ${TRANSLATION_DIR}`);
+    process.exit(1);
+  }
+
+  try {
+    const files = readdirSync(translationDir)
+      .filter(file => file.endsWith(".json"))
+      .sort();
+
+    if (files.length === 0) {
+      console.error(`Error: No JSON files found in ${translationDir}`);
+      process.exit(1);
+    }
+
+    return files;
+  } catch (error) {
+    console.error(`Error reading translation directory: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Prompt user to select translation file
+ */
+async function selectTranslationFile(files) {
+  // Find default file index
+  const defaultIndex = files.indexOf(DEFAULT_FILE);
+  const initialIndex = defaultIndex >= 0 ? defaultIndex : 0;
+
+  const response = await prompts({
+    type: "select",
+    name: "file",
+    message: "Select translation file:",
+    choices: files.map(file => ({ title: file, value: file })),
+    initial: initialIndex
+  });
+
+  if (!response.file) {
+    console.error("\nOperation cancelled");
+    process.exit(0);
+  }
+
+  return response.file;
+}
+
+/**
+ * Prompt user to select comparison mode
+ */
+async function selectMode() {
+  const response = await prompts({
+    type: "select",
+    name: "mode",
+    message: "Select comparison mode:",
+    choices: [
+      { title: "Work with uncommitted changes", value: "uncommitted" },
+      { title: "Work with last commit changes", value: "lastCommit" }
+    ],
+    initial: 0
+  });
+
+  if (!response.mode) {
+    console.error("\nOperation cancelled");
+    process.exit(0);
+  }
+
+  return response.mode;
+}
+
+/**
+ * Get file content from git at a specific revision
+ */
+function getFileFromGit(repoPath, filePath, revision) {
+  try {
+    const gitCommand = `git -C "${repoPath}" show ${revision}:${filePath}`;
     const content = execSync(gitCommand, { encoding: "utf-8" });
     return JSON.parse(content);
   } catch (error) {
     if (error.message.includes("exists on disk, but not in")) {
-      console.error(`Error: File ${translationConfig.filePath} does not exist in ${translationConfig.baseBranch}`);
-    } else if (error.message.includes("unknown revision")) {
-      console.error(`Error: Branch ${translationConfig.baseBranch} not found. Did you forget to fetch?`);
+      console.error(`Error: File ${filePath} does not exist in ${revision}`);
+    } else if (error.message.includes("unknown revision") || error.message.includes("bad revision")) {
+      console.error(`Error: Revision ${revision} not found`);
     } else {
-      console.error(`Error reading base file from git: ${error.message}`);
+      console.error(`Error reading file from git: ${error.message}`);
     }
     process.exit(1);
   }
 }
 
 /**
- * Get the current version of the translation file from the filesystem
+ * Get current file content from filesystem
  */
-function getCurrentFileContent() {
+function getCurrentFileContent(repoPath, filePath) {
   try {
-    const fullPath = join(translationConfig.repoPath, translationConfig.filePath);
+    const fullPath = join(repoPath, filePath);
     const content = readFileSync(fullPath, "utf-8");
     return JSON.parse(content);
   } catch (error) {
@@ -108,8 +175,28 @@ function getCurrentFileContent() {
 }
 
 /**
+ * Get file contents based on selected mode
+ */
+function getFileContents(repoPath, filePath, mode, baseBranch) {
+  let baseContent, currentContent, comparison;
+
+  if (mode === "uncommitted") {
+    // Compare: working directory vs HEAD
+    baseContent = getFileFromGit(repoPath, filePath, "HEAD");
+    currentContent = getCurrentFileContent(repoPath, filePath);
+    comparison = "working directory vs HEAD";
+  } else {
+    // Compare: HEAD vs HEAD~1
+    baseContent = getFileFromGit(repoPath, filePath, "HEAD~1");
+    currentContent = getFileFromGit(repoPath, filePath, "HEAD");
+    comparison = "HEAD vs HEAD~1 (last commit)";
+  }
+
+  return { baseContent, currentContent, comparison };
+}
+
+/**
  * Flatten a nested path array to dot notation
- * Example: ['general', 'validation-errors', 'emptyString'] => 'general.validation-errors.emptyString'
  */
 function flattenPath(pathArray) {
   return pathArray.join(".");
@@ -117,7 +204,6 @@ function flattenPath(pathArray) {
 
 /**
  * Recursively flatten a nested object to leaf key-value pairs
- * Example: { a: { b: "value1", c: "value2" } } => [{ key: "a.b", value: "value1" }, { key: "a.c", value: "value2" }]
  */
 function flattenObject(obj, prefix = "") {
   const result = [];
@@ -126,10 +212,8 @@ function flattenObject(obj, prefix = "") {
     const fullKey = prefix ? `${prefix}.${key}` : key;
 
     if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      // Recursively flatten nested objects
       result.push(...flattenObject(value, fullKey));
     } else {
-      // Leaf node - add to results
       result.push({ key: fullKey, value: String(value) });
     }
   }
@@ -139,7 +223,6 @@ function flattenObject(obj, prefix = "") {
 
 /**
  * Detect newly added translation keys using deep-diff
- * Returns array of { key, value } objects for new keys only
  */
 function detectNewKeys(baseContent, currentContent) {
   const differences = diff(baseContent, currentContent) || [];
@@ -151,14 +234,12 @@ function detectNewKeys(baseContent, currentContent) {
 
   for (const item of newItems) {
     const basePath = flattenPath(item.path);
-    const value = item.rhs; // right-hand side = new value
+    const value = item.rhs;
 
     if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      // If the new value is an object, recursively flatten it
       const flattened = flattenObject(value, basePath);
       newKeys.push(...flattened);
     } else {
-      // Leaf node - add directly
       newKeys.push({ key: basePath, value: String(value) });
     }
   }
@@ -183,7 +264,6 @@ function generateMarkdownTable(pairs) {
 
 /**
  * Convert key:value pairs to ADF table format
- * Returns an ADF table object for Jira API
  */
 function createADFTable(pairs) {
   if (pairs.length === 0) {
@@ -198,7 +278,6 @@ function createADFTable(pairs) {
     };
   }
 
-  // Create header row
   const headerRow = {
     type: "tableRow",
     content: [
@@ -223,7 +302,6 @@ function createADFTable(pairs) {
     ]
   };
 
-  // Create data rows
   const dataRows = pairs.map(pair => ({
     type: "tableRow",
     content: [
@@ -256,22 +334,18 @@ function createADFTable(pairs) {
 
 /**
  * Get Jira account ID from email address
- * Returns null if user cannot be found (non-fatal)
  */
-async function getAccountId(email, auth) {
+async function getAccountId(email, auth, config) {
   if (!email) return null;
 
   try {
-    // Try multiple search methods
     const endpoints = [
-      // Method 1: Assignable search (project-specific)
       {
-        url: `${config.baseURL}/rest/api/3/user/assignable/search`,
-        params: { query: email, projectId: config.projectId },
+        url: `${config.jira.baseURL}/rest/api/3/user/assignable/search`,
+        params: { query: email, projectId: config.jira.projectId },
       },
-      // Method 2: General user search
       {
-        url: `${config.baseURL}/rest/api/3/user/search`,
+        url: `${config.jira.baseURL}/rest/api/3/user/search`,
         params: { query: email },
       },
     ];
@@ -284,7 +358,6 @@ async function getAccountId(email, auth) {
         });
 
         if (response.data && response.data.length > 0) {
-          // Find exact email match (case-insensitive)
           const exactMatch = response.data.find(
             (user) => user.emailAddress?.toLowerCase() === email.toLowerCase()
           );
@@ -293,19 +366,16 @@ async function getAccountId(email, auth) {
             return exactMatch.accountId;
           }
 
-          // If no exact match, return first result (partial match)
           console.warn(
             `  ⚠ No exact match for ${email}, using: ${response.data[0].emailAddress || response.data[0].displayName}`
           );
           return response.data[0].accountId;
         }
       } catch (err) {
-        // Try next endpoint
         continue;
       }
     }
 
-    // Could not find user with any method
     console.warn(`  ⚠ Could not find user: ${email} (will be unassigned)`);
     return null;
   } catch (error) {
@@ -317,35 +387,33 @@ async function getAccountId(email, auth) {
 /**
  * Create Jira issue
  */
-async function createJiraIssue(title, description) {
+async function createJiraIssue(title, description, config) {
   const auth = {
-    username: config.email,
-    password: config.apiToken,
+    username: config.jira.email,
+    password: config.jira.apiToken,
   };
 
   try {
     console.log("\nResolving Jira user accounts...");
 
-    // Get account IDs for assignee and reporter
     const [assigneeId, reporterId] = await Promise.all([
-      getAccountId(config.assigneeEmail, auth),
-      getAccountId(config.reporterEmail, auth),
+      getAccountId(config.jira.assigneeEmail, auth, config),
+      getAccountId(config.jira.reporterEmail, auth, config),
     ]);
 
     if (assigneeId) {
-      console.log(`  ✓ Assignee: ${config.assigneeEmail}`);
+      console.log(`  ✓ Assignee: ${config.jira.assigneeEmail}`);
     }
     if (reporterId) {
-      console.log(`  ✓ Reporter: ${config.reporterEmail}`);
+      console.log(`  ✓ Reporter: ${config.jira.reporterEmail}`);
     }
 
     console.log("\nCreating Jira issue...");
 
-    // Build issue data with optional assignee and reporter
     const issueData = {
       fields: {
         project: {
-          id: config.projectId,
+          id: config.jira.projectId,
         },
         summary: title,
         description: {
@@ -354,23 +422,21 @@ async function createJiraIssue(title, description) {
           content: [description],
         },
         issuetype: {
-          id: config.issueTypeId,
+          id: config.jira.issueTypeId,
         },
         labels: ["localisation"],
       },
     };
 
-    // Only add assignee if we found the user
     if (assigneeId) {
       issueData.fields.assignee = { id: assigneeId };
     }
 
-    // Only add reporter if we found the user
     if (reporterId) {
       issueData.fields.reporter = { id: reporterId };
     }
 
-    const response = await axios.post(`${config.baseURL}/rest/api/3/issue`, issueData, {
+    const response = await axios.post(`${config.jira.baseURL}/rest/api/3/issue`, issueData, {
       auth,
       headers: {
         "Content-Type": "application/json",
@@ -394,28 +460,51 @@ async function createJiraIssue(title, description) {
   }
 }
 
-// Main execution
+/**
+ * Main execution
+ */
 async function main() {
   try {
-    // Validate configuration
-    validateConfig();
+    console.log("=".repeat(60));
+    console.log("  Jira Localization Task Creator");
+    console.log("=".repeat(60) + "\n");
 
-    console.log("Comparing translation files...");
-    console.log(`  Repository: ${translationConfig.repoPath}`);
-    console.log(`  File: ${translationConfig.filePath}`);
-    console.log(`  Base branch: ${translationConfig.baseBranch}\n`);
+    // Load configuration
+    const config = loadConfig();
 
-    // Get base and current versions
-    const baseContent = getBaseFileContent();
-    const currentContent = getCurrentFileContent();
+    // Detect git repository
+    const repoPath = getGitRoot();
+    console.log(`Repository: ${repoPath}\n`);
+
+    // Find available translation files
+    const files = findTranslationFiles(repoPath);
+
+    // Prompt user to select file
+    const selectedFile = await selectTranslationFile(files);
+    const filePath = join(TRANSLATION_DIR, selectedFile);
+
+    // Prompt user to select mode
+    const mode = await selectMode();
+
+    console.log("\nComparing translation files...");
+    console.log(`  File: ${filePath}`);
+
+    // Get file contents based on mode
+    const { baseContent, currentContent, comparison } = getFileContents(
+      repoPath,
+      filePath,
+      mode,
+      config.baseBranch || "origin/master"
+    );
+
+    console.log(`  Comparison: ${comparison}\n`);
 
     // Detect new keys
     const newKeys = detectNewKeys(baseContent, currentContent);
 
-    // Generate output
     if (newKeys.length === 0) {
       console.log("No new translation keys detected.");
-      return; // Exit early if no keys found
+      return;
     }
 
     console.log(`✅ ${newKeys.length} new key${newKeys.length > 1 ? "s" : ""} detected`);
@@ -423,18 +512,16 @@ async function main() {
     console.log(generateMarkdownTable(newKeys));
 
     // Generate task title
-    const taskTitle = newKeys.length > 0
-      ? `Localization request – ${newKeys[0].key}`
-      : "Localization request";
+    const taskTitle = `Localization request – ${newKeys[0].key}`;
 
     // Create ADF table for Jira
     const tableContent = createADFTable(newKeys);
 
     // Create Jira issue
-    const issue = await createJiraIssue(taskTitle, tableContent);
+    const issue = await createJiraIssue(taskTitle, tableContent, config);
 
     // Output results
-    const issueUrl = `${config.baseURL}/browse/${issue.key}`;
+    const issueUrl = `${config.jira.baseURL}/browse/${issue.key}`;
 
     console.log("\n" + "=".repeat(60));
     console.log("✓ SUCCESS!");
@@ -445,7 +532,9 @@ async function main() {
 
   } catch (error) {
     console.error("\n✗ Failed to process translation files");
-    console.error(error.message);
+    if (error.message) {
+      console.error(error.message);
+    }
     process.exit(1);
   }
 }
